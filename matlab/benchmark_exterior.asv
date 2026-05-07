@@ -1,0 +1,225 @@
+function run_benchmark()
+cfg = get_reference_config();
+
+% =========================================================================
+% 1. CARREGAMENTO DAS 90 TILES
+% =========================================================================
+basePath = '/Volumes/HDD 500GB/dados_sum_proj';
+datasets = cell(90, 3); 
+
+for i = 1:90
+    imgName  = sprintf('dapi_sum_tile_%d.tif', i);
+    maskName = sprintf('mask_max_tile_%d.tif', i);
+    
+    datasets{i, 1} = sprintf('Tile %d', i);
+    datasets{i, 2} = fullfile(basePath, imgName);
+    datasets{i, 3} = fullfile(basePath, maskName);
+end
+
+% =========================================================================
+% 2. CARREGAR O FICHEIRO TSV 
+% =========================================================================
+fprintf('\n[1/2] A ler o ficheiro TSV Mestre com as anotações...\n');
+tsv_path = fullfile(basePath, 'GT_labels_40x_with_source_file.tsv');
+gt_table = readtable(tsv_path, 'FileType', 'text', 'Delimiter', '\t', 'VariableNamingRule', 'preserve');
+fprintf('      ✅ TSV carregado!\n');
+
+% =========================================================================
+% 3. CONFIGURAÇÃO DE FEATURES E PARÂMETROS
+% =========================================================================
+feat_profiles = {
+    '1D Int. DAPI', ...
+    '1D Log(IntDAPI)', ...
+    '2D Area + Mean', ...
+    '2D Int + Mean', ...
+    '2D LogInt + MeanNoBg', ...
+    '2D Int + MeanNoBg', ...
+    '2D Int + Area', ...
+    '3D Int + Mean + Area', ...
+    '2D IntDensity + Mean'
+};
+nc_vals = [2];
+
+min_area        = cfg.min_area;
+max_area        = cfg.max_area;
+min_circ        = cfg.min_circ;
+min_sol         = cfg.min_sol;
+min_ext         = cfg.min_ext;
+min_int         = cfg.min_int_frac;
+ws_foot         = cfg.ws_foot;
+border_margin   = cfg.border_margin;
+min_border_frac = cfg.min_border_frac;
+amb_thresh      = cfg.amb_thresh;
+nbr_radius      = cfg.nbr_radius;
+
+nF = numel(feat_profiles);
+nD = size(datasets,1);
+
+soma_km_acc  = zeros(nF, 1); soma_gm_acc  = zeros(nF, 1); soma_ens_acc = zeros(nF, 1);
+soma_km_sil  = zeros(nF, 1); soma_gm_sil  = zeros(nF, 1); soma_ens_sil = zeros(nF, 1);
+soma_km_g1   = zeros(nF, 1); soma_km_g2   = zeros(nF, 1); soma_amb     = zeros(nF, 1);
+count_ok     = zeros(nF, 1);
+
+warning('off', 'stats:gmdistribution:FailedToConvergeReps');
+warning('off', 'stats:gmdistribution:FailedToConverge');
+
+fprintf('\n========================================================================================================================\n');
+fprintf(' BENCHMARK DE FEATURES — cell_cycle_v12 (90 Imagens)\n');
+fprintf('========================================================================================================================\n');
+
+% =========================================================================
+% 4. CICLO PRINCIPAL DE AVALIAÇÃO
+% =========================================================================
+for d = 1:nD
+    ds_name = datasets{d,1};
+    img = imread(datasets{d,2});
+    
+    fprintf('\n>>>>> DATASET: %s\n', ds_name);
+    
+    % --- MAGIA DO GROUND TRUTH AQUI (Versão Bulletproof) ---
+    instance_mask = imread(datasets{d,3});
+    gt_img = zeros(size(instance_mask), 'uint8'); 
+    
+    tile_num = sscanf(ds_name, 'Tile %d');
+    
+    % Filtra de forma estritamente numérica!
+    if isnumeric(gt_table.tile_num)
+        linhas_da_tile = gt_table.tile_num == tile_num;
+    else
+        linhas_da_tile = strcmp(strtrim(string(gt_table.tile_num)), num2str(tile_num));
+    end
+    
+    dados_tile = gt_table(linhas_da_tile, :);
+    celulas_encontradas = height(dados_tile);
+    pixels_pintados = 0;
+    
+    for idx = 1:celulas_encontradas
+        cell_id = dados_tile.obj_num(idx);
+        fase_texto = string(dados_tile.GT_label(idx)); % Força tudo a ser lido como String
+        
+        if contains(fase_texto, "G1", 'IgnoreCase', true)
+            valor_fase = 1;
+        elseif contains(fase_texto, "G2", 'IgnoreCase', true) || contains(fase_texto, "M", 'IgnoreCase', true)
+            valor_fase = 2;
+        else
+            valor_fase = 0; 
+        end
+        
+        % Onde a máscara for igual a este ID, pinta com a fase!
+        mascara_desta_celula = (instance_mask == cell_id);
+        gt_img(mascara_desta_celula) = valor_fase;
+        
+        if valor_fase > 0
+            pixels_pintados = pixels_pintados + sum(mascara_desta_celula(:));
+        end
+    end
+    
+    fprintf('      [DEBUG] Encontradas %d células no TSV. Pixels mapeados no GT: %d\n', celulas_encontradas, pixels_pintados);
+    % -------------------------------------------------------
+    
+    for nc = nc_vals
+        fprintf('\n--- %d FASES ---\n', nc);
+        fprintf('%-25s | %8s %8s %8s | %8s %8s %8s | %5s %5s | %4s\n', ...
+            'Feature', 'KM_Acc%', 'GM_Acc%', 'EN_Acc%', 'KM_Sil', 'GM_Sil', 'EN_Sil', 'KM_G1', 'KM_G2', 'Amb');
+        fprintf('%s\n', repmat('-',1,115));
+        
+        for f = 1:nF
+            feat = feat_profiles{f};
+            try
+                r = analyse(img, nc, feat, min_area, max_area, ...
+                    min_circ, min_sol, min_ext, min_int, ...
+                    ws_foot, border_margin, min_border_frac);
+                
+                r = add_silhouette_metrics(r);
+                
+                ev_km  = evaluate_against_gt(r, r.km,  gt_img, nc, amb_thresh, nbr_radius);
+                ev_gm  = evaluate_against_gt(r, r.gm,  gt_img, nc, amb_thresh, nbr_radius);
+                ev_ens = evaluate_against_gt(r, r.ens, gt_img, nc, amb_thresh, nbr_radius);
+                
+                km_sil_m = mean(r.sil_km,'omitnan');
+                gm_sil_m = mean(r.sil_gm,'omitnan');
+                ens_sil_m = mean(r.sil_ens,'omitnan');
+                g1_count = sum(r.km==1);
+                g2_count = sum(r.km==2);
+                amb_count = ev_km.n_ambiguous;
+                
+                if ~isnan(ev_km.accuracy)
+                    soma_km_acc(f) = soma_km_acc(f) + ev_km.accuracy;
+                    soma_gm_acc(f) = soma_gm_acc(f) + ev_gm.accuracy;
+                    soma_ens_acc(f) = soma_ens_acc(f) + ev_ens.accuracy;
+                    soma_km_sil(f) = soma_km_sil(f) + km_sil_m;
+                    soma_gm_sil(f) = soma_gm_sil(f) + gm_sil_m;
+                    soma_ens_sil(f) = soma_ens_sil(f) + ens_sil_m;
+                    soma_km_g1(f) = soma_km_g1(f) + g1_count;
+                    soma_km_g2(f) = soma_km_g2(f) + g2_count;
+                    soma_amb(f)   = soma_amb(f) + amb_count;
+                    count_ok(f) = count_ok(f) + 1;
+                end
+                
+                fprintf('%-25s | %7.2f%% %7.2f%% %7.2f%% | %8.4f %8.4f %8.4f | %5d %5d | %4d\n', ...
+                    feat, ...
+                    100*ev_km.accuracy, 100*ev_gm.accuracy, 100*ev_ens.accuracy, ...
+                    km_sil_m, gm_sil_m, ens_sil_m, ...
+                    g1_count, g2_count, amb_count);
+            catch ME
+                fprintf('%-25s | ERRO: %s\n', feat, ME.message);
+            end
+        end
+    end
+end
+
+warning('on', 'stats:gmdistribution:FailedToConvergeReps');
+warning('on', 'stats:gmdistribution:FailedToConverge');
+
+fprintf('\n========================================================================================================================\n');
+fprintf(' MÉDIAS GLOBAIS POR MÉTODO\n');
+fprintf('========================================================================================================================\n');
+fprintf('%-25s | %8s %8s %8s | %8s %8s %8s | %5s %5s | %4s\n', ...
+    'Feature', 'KM_Acc%', 'GM_Acc%', 'EN_Acc%', 'KM_Sil', 'GM_Sil', 'EN_Sil', 'KM_G1', 'KM_G2', 'Amb');
+fprintf('%s\n', repmat('-',1,115));
+
+melhor_ens_acc = -1; melhor_ens_nome = '';
+melhor_km_acc = -1;  melhor_km_nome = '';
+melhor_gm_acc = -1;  melhor_gm_nome = '';
+melhor_km_sil = -inf; melhor_kmsil_nome = '';
+melhor_gm_sil = -inf; melhor_gmsil_nome = '';
+melhor_ens_sil= -inf; melhor_enssil_nome= '';
+
+for f = 1:nF
+    if count_ok(f) > 0
+        a_km  = 100 * soma_km_acc(f) / count_ok(f);
+        a_gm  = 100 * soma_gm_acc(f) / count_ok(f);
+        a_ens = 100 * soma_ens_acc(f) / count_ok(f);
+        s_km  = soma_km_sil(f) / count_ok(f);
+        s_gm  = soma_gm_sil(f) / count_ok(f);
+        s_ens = soma_ens_sil(f) / count_ok(f);
+        g1_m  = soma_km_g1(f) / count_ok(f);
+        g2_m  = soma_km_g2(f) / count_ok(f);
+        amb_m = soma_amb(f) / count_ok(f);
+        
+        fprintf('%-25s | %7.2f%% %7.2f%% %7.2f%% | %8.4f %8.4f %8.4f | %5.2f %5.2f | %4.2f\n', ...
+            feat_profiles{f}, a_km, a_gm, a_ens, s_km, s_gm, s_ens, g1_m, g2_m, amb_m);
+        
+        if a_km > melhor_km_acc, melhor_km_acc = a_km; melhor_km_nome = feat_profiles{f}; end
+        if a_gm > melhor_gm_acc, melhor_gm_acc = a_gm; melhor_gm_nome = feat_profiles{f}; end
+        if a_ens > melhor_ens_acc, melhor_ens_acc = a_ens; melhor_ens_nome = feat_profiles{f}; end
+        if s_km > melhor_km_sil, melhor_km_sil = s_km; melhor_kmsil_nome = feat_profiles{f}; end
+        if s_gm > melhor_gm_sil, melhor_gm_sil = s_gm; melhor_gmsil_nome = feat_profiles{f}; end
+        if s_ens > melhor_ens_sil, melhor_ens_sil = s_ens; melhor_enssil_nome = feat_profiles{f}; end
+    else
+        fprintf('%-25s | DADOS INSUFICIENTES\n', feat_profiles{f});
+    end
+end
+
+fprintf('\n--- MELHORES PELAS MÉDIAS GLOBAIS ---\n');
+fprintf('Melhor KM accuracy:     %-25s (%.2f%%)\n', melhor_km_nome, melhor_km_acc);
+fprintf('Melhor GM accuracy:     %-25s (%.2f%%)\n', melhor_gm_nome, melhor_gm_acc);
+fprintf('Melhor ENS accuracy:    %-25s (%.2f%%)\n', melhor_ens_nome, melhor_ens_acc);
+
+all_accs = [melhor_km_acc, melhor_gm_acc, melhor_ens_acc];
+all_names = {melhor_km_nome, melhor_gm_nome, melhor_ens_nome};
+[best_glob_acc, idx] = max(all_accs);
+
+fprintf('\n>>> Melhor feature global (melhor entre KM/GM/ENS): %s (%.2f%%) <<<\n', all_names{idx}, best_glob_acc);
+fprintf('========================================================================================================================\n\n');
+end

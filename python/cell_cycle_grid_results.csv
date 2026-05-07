@@ -1,0 +1,5 @@
+dataset,n_total,n_valid,n_ambiguous,coverage,baseline_accuracy,reference_fit_accuracy,reference_lodo_accuracy,rg_identical_to_gt
+sub1,46,45,1,0.9783,0.8222,1.0000,0.6889,True
+sub2,47,46,1,0.9787,0.6739,1.0000,0.6739,True
+sub3,64,63,1,0.9844,0.6032,1.0000,0.7143,True
+sub4,63,60,3,0.9524,0.5000,1.0000,0.5833,True

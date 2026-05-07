@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+    <meta charset="UTF-8">
+    <title>Ensemble Tie-Breaker Demo</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            background-color: #16181d;
+            color: #e0e4eb;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        h2 { margin-bottom: 5px; color: #ffffff; }
+        p { margin-top: 0; margin-bottom: 20px; color: #a0a6b5; }
+        #canvas-container {
+            background-color: #1e2128;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            overflow: hidden;
+            position: relative;
+        }
+        .centroid-label {
+            font-size: 12px;
+            font-weight: bold;
+            pointer-events: none;
+            text-anchor: middle;
+        }
+        .distance-label {
+            font-size: 14px;
+            font-weight: bold;
+            pointer-events: none;
+            text-shadow: 0px 0px 4px #16181d;
+        }
+        #readout {
+            margin-top: 20px;
+            padding: 15px 30px;
+            background-color: #282c34;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: bold;
+            border: 2px solid #3e4451;
+            transition: border-color 0.3s;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Clustering ENS Tie-Breaker</h2>
+    <p>Arrasta a "Target Cell" para veres a distância Euclidiana a desempatar</p>
+    
+    <div id="canvas-container"></div>
+    <div id="readout">A calcular...</div>
+
+    <script>
+        const width = 800;
+        const height = 500;
+
+        // Definir os pontos fixos (Centroides)
+        const centroids = [
+            { id: "KM_G1", name: "KM G1", x: 280, y: 200, color: "#4a90e2", type: "KM" },
+            { id: "GMM_G1", name: "GMM G1", x: 310, y: 160, color: "#e06c75", type: "GMM" },
+            { id: "KM_G2", name: "KM G2", x: 550, y: 350, color: "#4a90e2", type: "KM" },
+            { id: "GMM_G2", name: "GMM G2", x: 520, y: 390, color: "#e06c75", type: "GMM" }
+        ];
+
+        // Estado inicial da Célula Alvo
+        let target = { x: 400, y: 280 };
+
+        const svg = d3.select("#canvas-container")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        // --- BACKGROUND ELEMENTS (Boundary & Ellipses) ---
+        
+        // 1. Linha de Decisão do K-Means (Perpendicular Bisector)
+        const km1 = centroids[0];
+        const km2 = centroids[2];
+        const mx = (km1.x + km2.x) / 2;
+        const my = (km1.y + km2.y) / 2;
+        const dx = km2.x - km1.x;
+        const dy = km2.y - km1.y;
+        
+        // Calcular vetor perpendicular para desenhar a linha a cruzar o ecrã
+        const scale = 5;
+        svg.append("line")
+            .attr("x1", mx - dy * scale)
+            .attr("y1", my + dx * scale)
+            .attr("x2", mx + dy * scale)
+            .attr("y2", my - dx * scale)
+            .attr("stroke", "#4a90e2")
+            .attr("stroke-width", 2)
+            .attr("stroke-dasharray", "10,10")
+            .attr("opacity", 0.3);
+
+        // 2. Elipses de Probabilidade do GMM
+        const gmm1 = centroids[1];
+        const gmm2 = centroids[3];
+        
+        svg.append("ellipse")
+            .attr("cx", gmm1.x)
+            .attr("cy", gmm1.y)
+            .attr("rx", 140)
+            .attr("ry", 70)
+            .attr("transform", `rotate(-30 ${gmm1.x} ${gmm1.y})`)
+            .attr("stroke", gmm1.color)
+            .attr("stroke-width", 2)
+            .attr("stroke-dasharray", "6,6")
+            .attr("fill", gmm1.color)
+            .attr("fill-opacity", 0.05)
+            .attr("opacity", 0.6);
+
+        svg.append("ellipse")
+            .attr("cx", gmm2.x)
+            .attr("cy", gmm2.y)
+            .attr("rx", 180)
+            .attr("ry", 80)
+            .attr("transform", `rotate(-20 ${gmm2.x} ${gmm2.y})`)
+            .attr("stroke", gmm2.color)
+            .attr("stroke-width", 2)
+            .attr("stroke-dasharray", "6,6")
+            .attr("fill", gmm2.color)
+            .attr("fill-opacity", 0.05)
+            .attr("opacity", 0.6);
+
+        // -------------------------------------------------
+
+        // Grupo para as linhas dinâmicas
+        const linesGroup = svg.append("g");
+        // Grupo para os textos das distâncias
+        const distancesGroup = svg.append("g");
+
+        // Desenhar os centroides
+        svg.selectAll(".centroid")
+            .data(centroids)
+            .enter()
+            .append("rect")
+            .attr("x", d => d.x - 15)
+            .attr("y", d => d.y - 15)
+            .attr("width", 30)
+            .attr("height", 30)
+            .attr("rx", 5)
+            .attr("fill", "#1e2128")
+            .attr("stroke", d => d.color)
+            .attr("stroke-width", 3);
+
+        svg.selectAll(".centroid-text")
+            .data(centroids)
+            .enter()
+            .append("text")
+            .attr("class", "centroid-label")
+            .attr("x", d => d.x)
+            .attr("y", d => d.y + 4)
+            .attr("fill", d => d.color)
+            .text(d => d.type === "KM" ? "K" : "G");
+
+        svg.selectAll(".centroid-name")
+            .data(centroids)
+            .enter()
+            .append("text")
+            .attr("class", "centroid-label")
+            .attr("x", d => d.x)
+            .attr("y", d => d.y + 32)
+            .attr("fill", "#ffffff")
+            .text(d => d.name);
+
+        // Função de arrasto da Célula Alvo
+        const drag = d3.drag()
+            .on("drag", (event) => {
+                target.x = event.x;
+                target.y = event.y;
+                update();
+            });
+
+        // Desenhar a Célula Alvo
+        const targetNode = svg.append("g")
+            .attr("cursor", "grab")
+            .call(drag);
+
+        targetNode.append("circle")
+            .attr("r", 20)
+            .attr("fill", "#61afef")
+            .attr("stroke", "#ffffff")
+            .attr("stroke-width", 3)
+            .attr("opacity", 0.9);
+            
+        targetNode.append("circle")
+            .attr("r", 6)
+            .attr("fill", "#ffffff");
+
+        targetNode.append("rect")
+            .attr("x", -45)
+            .attr("y", -38)
+            .attr("width", 90)
+            .attr("height", 20)
+            .attr("rx", 10)
+            .attr("fill", "#282c34")
+            .attr("stroke", "#61afef")
+            .attr("stroke-width", 1);
+
+        targetNode.append("text")
+            .attr("y", -24)
+            .attr("text-anchor", "middle")
+            .attr("fill", "#ffffff")
+            .attr("font-weight", "bold")
+            .attr("font-size", "11px")
+            .text("TARGET CELL");
+
+        function update() {
+            targetNode.attr("transform", `translate(${target.x}, ${target.y})`);
+
+            // Calcular distâncias
+            let distances = centroids.map(c => {
+                let dist = Math.sqrt(Math.pow(target.x - c.x, 2) + Math.pow(target.y - c.y, 2));
+                return { ...c, distance: dist };
+            });
+
+            // Encontrar o vencedor (distância mínima)
+            distances.sort((a, b) => a.distance - b.distance);
+            let winner = distances[0];
+
+            // Atualizar Linhas
+            let lines = linesGroup.selectAll("line").data(distances);
+            
+            lines.enter().append("line")
+                .merge(lines)
+                .attr("x1", target.x)
+                .attr("y1", target.y)
+                .attr("x2", d => d.x)
+                .attr("y2", d => d.y)
+                .attr("stroke", d => d.id === winner.id ? d.color : "#5c6370")
+                .attr("stroke-width", d => d.id === winner.id ? 4 : 2)
+                .attr("stroke-dasharray", d => d.id === winner.id ? "0" : "5,5")
+                .attr("opacity", d => d.id === winner.id ? 1 : 0.4);
+
+            // Atualizar Textos das Distâncias (Apenas para o vencedor)
+            let texts = distancesGroup.selectAll("text").data([winner]);
+
+            texts.enter().append("text")
+                .attr("class", "distance-label")
+                .merge(texts)
+                .attr("x", d => (target.x + d.x) / 2)
+                .attr("y", d => (target.y + d.y) / 2 - 10)
+                .attr("fill", "#ffffff") // Forçar branco para se ver bem sobre as linhas
+                .text(d => `${d.distance.toFixed(1)} px`);
+
+            // Atualizar a caixa de texto em baixo
+            let readout = document.getElementById("readout");
+            readout.innerHTML = `🏆 Decisão do ENS: Atribuído a <span style="color:${winner.color}">${winner.name}</span> (${winner.distance.toFixed(1)} px)`;
+            readout.style.borderColor = winner.color;
+        }
+
+        // Primeira renderização
+        update();
+    </script>
+</body>
+</html>
