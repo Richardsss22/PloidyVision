@@ -6,6 +6,14 @@ Advanced cell-cycle analysis and ploidy determination from microscopic images. T
 
 PloidyVision is designed to automate the classification of cell cycle phases (ploidy levels) in microscopy datasets. The core strategy focuses on a **DAPI-only prediction** pipeline, ensuring that final Stage predictions are produced without reading ground-truth labels, which are reserved strictly for evaluation.
 
+## 📂 Data Source
+
+The datasets used in this project are sourced from the **BioImage Archive** (EMBL-EBI).
+- **Accession ID**: [S-BIAD1752](https://www.ebi.ac.uk/biostudies/bioimages/studies/S-BIAD1752)
+- **Source URL**: [https://ftp.ebi.ac.uk/biostudies/fire/S-BIAD/752/S-BIAD1752/Files/](https://ftp.ebi.ac.uk/biostudies/fire/S-BIAD/752/S-BIAD1752/Files/)
+
+This repository includes scripts (e.g., `python/downloader.py`) to automate the acquisition of these high-resolution tiles.
+
 ### Key Methodology
 - **Feature Space**: 2D classification using `log(Intensity_NoBg)` and `log(Area)`.
 - **Primary Predictor**: A weighted kNN atlas implementation.
